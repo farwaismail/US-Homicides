@@ -1,0 +1,485 @@
+---
+title: "STA 9750 Final Project - US Homicides 1980-2014"
+author: "Amy Xu, David Genfan, Davin Yu and Farwa Ismail"
+date: "5/24/2020"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r include=FALSE}
+library(randomForest)
+require(caTools)
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(modelr)
+library(knitr)
+library(RColorBrewer)
+library(scales)
+library(naivebayes)
+```
+
+## Data Summary
+This dataset was pulled from [kaggle](https://www.kaggle.com/murderaccountability/homicide-reports). Founded by Thomas Hargrove, the Murder Accountability Project is the most complete database of homocides in the United States. It spans from 1980 to 2014 and includes variables such as the age, race, sex, ethnicity of the victims and perpetrators, as well as their relationships and the weapons used. The data was sourced from the FBI's Supplementary Homocide Report and Freedom of Information Act (FOIA) requests.
+
+Below are all the variables we have in our dataset:
+```{r echo=FALSE}
+#set working directory
+#setwd("~/Desktop/OPR9750/Final_Project")
+
+#read in data from working directory
+homicides = read.csv('C:\\Baruch College\\2nd Semester\\STA9750\\Project\\database\\database.csv')
+homicides_raw <- read.csv('C:\\Baruch College\\2nd Semester\\STA9750\\Project\\database\\database.csv')
+
+colnames(homicides) = tolower(colnames(homicides))
+colnames(homicides_raw) = tolower(colnames(homicides_raw))
+colnames(homicides)
+```
+
+The summary for the dataset is included in the appendix which shows what each column looks like. In addition, shown below are some summary points: 
+```{r echo=FALSE, results='asis'}
+metadataHomicides = data.frame('Attributes'= c('Dimensions', 'No. of Unique Record IDs', 'Any Record IDs Duplicated?', 'Any NA values in the database?'),'Values' = c(toString(dim(homicides)),length(unique(homicides$Record.ID)), anyDuplicated(homicides$Record.ID), anyNA(homicides)))
+
+kable(metadataHomicides)
+```
+
+## Cleaning the Dataset
+Looking further into the dataset, we see that `victim.age` has a value of 998 for some records. It is fair to say that humans don't live that long, therefore we will filter the dataset to not include these records. Moreover, we ignore `perpetrator.age` below 18 since laws are different for juviniles and some ages go as low as zero which doesn't make sense.
+
+Then there is the issue of 'Unknown' sexes, races and ethnicities. We noticed that `victim.ethnicity` and `perpetrator.ethnicity`, both have a lot of Unknown values. Along with that, these variables only include whether the individual was hispanic or not. So for the most part, we will be ignoring these variables. 
+
+`incident`, `victim.count` and `perpetrator.count` are three more variables which don't make sense. Not much has been said about them by the sources of the dataset as well.
+
+```{r echo=FALSE}
+homicides = homicides%>%
+  filter(victim.age != 998 & perpetrator.age >= 18 )
+
+homicides <- na.omit(homicides)
+
+```
+
+After filtering for `victim.age`, and removing missing records, we have `r dim(homicides)[1]` records left.
+
+## Exploratory Analysis
+### 1. Homicide over the years 1980-2014
+
+As a starting point, we looked at the total number of homicides per year from 1980 to 2014. The number of homicides peaked in 1993 and declined sharply until 1999. From then, it rose gradually until 2007 and declined thereafter. Overall, homicides are down from the levels experienced in the 1990s. Why did the number of homicides decline so sharply from 1993 to 1999?
+
+```{r echo = FALSE, fig.height=3, fig.width=7}
+homicides %>% group_by(year) %>% summarize(n = n()) %>% ungroup() %>%
+  mutate(pct_change = (n - lag(n))/lag(n),
+         pct_change = replace_na(pct_change, 0)) %>%
+           ggplot(aes(year, n)) + geom_bar(stat = "identity", fill = "orange", color = "black") +
+           geom_line(color = "black", size = 1.5, linetype = "dashed") +
+           ggtitle("Total Number of Homicides in the US 1980-2014") + xlab("Year") + ylab("Number of Homocides") +
+           theme(plot.title = element_text(hjust = 0.5, size = 16))
+```
+
+
+### 2. Weapon use over the years 1980-2014
+
+To explore that question, we plotted the weapons used from 1980-2014. It's a little difficult to distinguish the different weapons given the sixteen classifications involved. 
+
+```{r echo = FALSE, fig.height=3, fig.width=7}
+ggplot(data = count(homicides,weapon, year), mapping = aes(year, n, group = weapon, color = weapon))+
+  geom_line(aes(linetype = weapon))
+```
+
+```{r echo = FALSE, fig.height=7, fig.width=9}
+homicides %>% group_by(year, weapon) %>% summarize(n = n()) %>% mutate(pct = percent(n/sum(n), accuracy = 0.01))%>% filter(pct > 2) %>%
+  ggplot(aes(year, n, fill = weapon, label = pct)) + geom_bar(stat = "identity") + geom_text(size = 2.5, position = position_stack(vjust = 0.5)) + coord_flip() +
+  ggtitle("Horizontal Barchart of Weapons Used 1980-2014") + xlab("Year") + ylab("Number of Homicides") + theme(plot.title = element_text(hjust = 0.5, size = 16))
+```
+
+By including only those weapons that have appeared 2% of the time or more, we narrowed that list to: Blunt Object, Firearm, Handgun, Knife, Rifle, Shotgun, Unknown. The horizontal bar chart plots the make-up of homicides each year by weapon-type. In 1993, 57.69% of homicides were committed with a handgun. If we include other gun-related weapon types such as firearm, rifle or shotgun, that figure rises. But, overall, hand-gun related homicides are down from the levels experienced in the 1990s. 
+
+### 3. Perpetrator and victim relationship status (Family) by State.
+
+We are also interested in the relationships between victims and perpetrators, specifically those where the relationship is familial. First we filter to keep only the cases where the relationship status indicates an immediate relationship: Father, Mother, Brother, Sister, Son, Daughter, Wife, Husband.
+Analysis will focus on the 3 states with the most crimes solved:
+California, Texas, and New York.
+
+```{r echo=FALSE, fig.width=13}
+solved = homicides %>% filter(crime.solved=="Yes")
+#sort state with the most cases
+states = count(solved, state) %>% arrange(desc(n)) %>% head(3)
+
+short_list = solved %>% filter(state == 'California' | state == 'Texas'
+                               | state == 'New York' | state == 'Florida'
+                               | state == 'Michigan')
+
+crimes_family <- short_list %>% 
+  mutate(family_murder = case_when(.$relationship=="Brother" &
+                                      .$perpetrator.sex =="Male" ~ "Brother Killed by Brother",
+                                    .$relationship=="Brother" & 
+                                      .$perpetrator.sex =="Female" ~ "Brother Killed by Sister",
+                                    .$relationship=="Sister" & 
+                                      .$perpetrator.sex =="Female" ~ "Sister Killed by Sister",
+                                    .$relationship=="Sister" & 
+                                      .$perpetrator.sex =="Male" ~ "Sister Killed by Brother",
+                                    .$relationship=="Mother" & 
+                                      .$perpetrator.sex =="Male" ~ "Mother Killed by Son",
+                                    .$relationship=="Mother" & 
+                                      .$perpetrator.sex =="Female" ~ "Mother Killed by Sister",
+                                    .$relationship=="Son" & 
+                                      .$perpetrator.sex =="Female" ~ "Son Killed by Mother",
+                                    .$relationship=="Son" & 
+                                      .$perpetrator.sex =="Male" ~ "Son Killed by Father",
+                                    .$relationship=="Daughter" & 
+                                      .$perpetrator.sex =="Female" ~ "Daughter Killed by Mother",
+                                    .$relationship=="Daughter" & 
+                                      .$perpetrator.sex =="Male" ~ "Daughter Killed by Father",
+                                    .$relationship=="Wife" & 
+                                      .$perpetrator.sex =="Male" ~ "Wife Killed by Husband",
+                                    .$relationship=="Husband" & 
+                                      .$perpetrator.sex =="Female" ~ "Husband Killed by wife",
+                                    .$relationship=="Father" & 
+                                      .$perpetrator.sex =="Female" ~ "Father Killed by Daughter",
+                                    .$relationship=="Father" & 
+                                      .$perpetrator.sex =="Male" ~ "Father Killed by Son",
+                                    TRUE~"Other"))
+
+create_plots = function(state, data) {
+  data2 <- summarise(group_by(data[data$family_murder!="Other" & data$state==state, ],family_murder),count =n())%>%
+    arrange(desc(count))
+  
+  data2$family_murder<- fct_inorder(data2$family_murder)  
+  data2$state = state
+  return (data2)
+}
+
+cali = create_plots("California", crimes_family)
+texas = create_plots("Texas", crimes_family)
+ny = create_plots("New York", crimes_family)
+florida = create_plots("Florida", crimes_family)
+michigan = create_plots("Michigan", crimes_family)
+
+all_states = data.frame(rbind(cali, texas,ny,florida,michigan))
+
+ggplot(all_states, aes(fill=state, y=count, x=family_murder)) + 
+  geom_bar(position="dodge", stat="identity")+
+  theme(axis.text.x=element_text(angle=90))+
+  ggtitle("Homicides with Family Relationship by State") 
+
+```
+
+In all three states, homicides involving a family relationship show that the wife being killed by the husband tower is the most common. In Texas and California, husband killed by wife is the second most common relationship. However, in New York wife killed by husband is followed by the son killed by father and son killed by mother. Sisters killed by sisters are the least prevalent in all three states.
+
+### 4. Percentage of weapons used by perpetrator gender.
+We also examined weapon choice by perpetrator gender. We found that females used blunt objects and knives more then males. The weapon of choice for males is dominated by Handgun. 
+
+```{r echo=FALSE, fig.width=13}
+female_perp = solved %>% filter(perpetrator.sex == "Female")
+male_perp = solved %>% filter(perpetrator.sex == "Male")
+
+#Weapon of choice based on gender
+female_perp2 <- summarise(group_by(female_perp,weapon),count =n())%>%
+  arrange(desc(count))
+
+#Weapon of choice based on gender
+f_perp <- summarise(group_by(female_perp,weapon),count =n())%>%
+  arrange(desc(count))
+f_total = sum(f_perp$count)
+f_perp2 = f_perp %>% mutate(percent = count/f_total, gender = "Female")
+m_perp <- summarise(group_by(male_perp,weapon),count =n())%>%
+  arrange(desc(count))
+m_total = sum(m_perp$count)
+m_perp2 = m_perp %>% mutate(percent = count/m_total, gender = "Male")
+
+perp_weapon = data.frame(rbind(f_perp2, m_perp2))
+
+ggplot(perp_weapon, aes(fill=gender, y=percent, x=weapon)) + 
+  geom_bar(position="dodge", stat="identity") + scale_y_continuous(labels = function(x) paste0(x * 100, '%')) +
+  ggtitle("Weapon Choice by Perpetrator Gender") 
+
+```
+
+# Modeling
+## Some Initial Cleaning for Modeling
+
+If we look at the types of variables we have available to us, we find that a lot of them are categorical, and often in this case the more categories and possible combinations we have, the more sparse our data will become for any sort of inference. We would like to maximize the data available for any particular combination of categorical variables, so as to make the inference process more accurate. In this vein, we will combine some of our categories to reduce the total number of possible combinations. 
+
+With some foresight as to the models we are about to run, weapons used in a homicide will be reduced to larger brackets such as: "guns","household objects", "physical force", "chemicals" and an "unknown" category. In addition, relationships are reduced to those part of the victim's family and those that are not.
+
+We will also perform a $70%$ train-test split, and get rid of categorical variables with large number of factors like 'cities', which has `r length(unique(homicides$city))` unique cities. 
+
+```{r echo=FALSE}
+homicides2 = homicides %>%
+  filter(relationship != 'Unknown' & victim.age != 998 & perpetrator.age >= 18 ) %>%
+  mutate(weapon_grouped = recode(weapon, 'Explosives' = 'gun',
+                                 'Firearm' = 'gun',
+                                 'Gun' = 'gun',
+                                 'Handgun' = 'gun',
+                                 'Rifle' = 'gun',
+                                 'Shotgun' = 'gun',
+                                 'Blunt Object' = 'hh_object',
+                                 'Knife' = 'hh_object',
+                                 'Strangulation' = 'physical_force',
+                                 'Suffocation' = 'physical_force',
+                                 'Drowning' = 'physical_force',
+                                 'Fall' = 'physical_force',
+                                 'Poison' = 'chemicals',
+                                 'Drugs' = 'chemicals',),
+         relationship_grouped = recode(relationship, 'Acquaintance' = 'Not Family',
+                                       'Boyfriend' = 'Family',
+                                       'Boyfriend/Girlfriend' = 'Family',
+                                       'Brother' = 'Family',
+                                       'Common-Law Husband' = 'Family',
+                                       'Common-Law Wife' = 'Family',
+                                       'Daughter' = 'Family',
+                                       'Employee' = 'Not Family',
+                                       'Employer' = 'Not Family',
+                                       'Ex-Husband' = 'Family',
+                                       'Ex-Wife' = 'Family',
+                                       'Family' = 'Family',
+                                       'Father' = 'Family',
+                                       'Friend' = 'Not Family',
+                                       'Girlfriend' = 'Family',
+                                       'Husband' = 'Family',
+                                       'In-Law' = 'Family',
+                                       'Mother' = 'Family',
+                                       'Neighbor' = 'Not Family',
+                                       'Sister' = 'Family',
+                                       'Son' = 'Family',
+                                       'Stepdaughter' = 'Family',
+                                       'Stepfather' = 'Family',
+                                       'Stepmother' = 'Family',
+                                       'Stepson' = 'Family',
+                                       'Stranger' = 'Not Family',
+                                       'Wife' = 'Family')) %>%
+  select(-victim.ethnicity, -perpetrator.ethnicity, -incident,-record.id,-agency.name,-city,
+         -agency.code,-state,-month,-year,-victim.count,-perpetrator.count, -relationship, -weapon)
+
+
+homicides2 = droplevels(homicides2)
+
+sample = sample.split(homicides2, SplitRatio = 0.70)
+train = subset(homicides2, sample == TRUE)
+test  = subset(homicides2, sample == FALSE)
+
+train$relationship_grouped = train$relationship_grouped == 'Family'
+test$relationship_grouped = test$relationship_grouped == 'Family'
+
+```
+
+## Who's the Killer?
+In this section we aim to make a classifier that can predict whether the perpetrator was a part of the victim's family, based on some information about the homicide case. This, if accurate to some extent, can be useful in helping law enforcement see what the data says about the perpetrator most standard cases, since this uses correlations based on actual past data.
+
+Our problem is then a classification problem of predicting a logical variable $Q_{Familiy}$ defined as:
+
+$$
+Q_{Family} =
+\begin{cases}
+1 \ \  \text{if perpetrator was part of the victim's family}\\
+0 \ \  \text{if perpetrator was not in the family}
+\end{cases}
+$$
+against multiple variables that we might have. As of this point in the analysis we have kept the following columns for our analysis. It's natural at this point to ask: __what are our features?__, what will we use to predict $Q_{Family}$?
+
+```{r echo=FALSE}
+#Running model 1
+colnames(train)
+```
+
+Our approach to constructing this classifier is to try a few different models that lend themselves well to the structure of this problem, like `glm`, `naive bayes` and finally a `random forest classifier` and see which models perform best. The process that follows was a mix of running different models and finding which features were *useful* along the way.
+
+### Generalised Linear Model
+The first thing to try naturally was a `glm`. We have a classification problem and we felt it would be great to see what kind of relations there are in the data in one cheap and easy go.  Initially we would have liked to use the `stepwise` function to help us in feature selection - getting the best fit while minimizing overfitting. However, it turned out that using the stepwise function to run many logistic regressions (as was the case with our particular classification problem) caused issues and the stepwise function would simply not converge. We chose not to follow that direction and instead went with another approach. 
+
+We started by running a simple logisitic regression on variables that made sense to us, to first see what kind of results we get. It would make sense to look at the sex and age of the victim and perpetrator as well as what kind of weapon was used. Our logistic regression problem looked like:
+
+
+$$ Q_{family} \sim \text{victim.sex}+\text{perpetrator.sex}+\text{victim.age}+\text{perpetrator.age}+\text{weapon} $$
+
+```{r echo=FALSE, warning=FALSE}
+#Running model 1
+model1 <- glm(relationship_grouped~victim.sex+perpetrator.sex+victim.age+perpetrator.age+weapon_grouped, data = train,family = "binomial")
+
+pred1 = plogis(predict(model1,newdata=test)) > 0.5
+accuracy1 = sum(pred1 == test$relationship_grouped)/length(pred1)
+```
+
+We found an accuracy of the above generalised linear model to be `r 100*accuracy1` %. Which is decent. The confusion matrix is also shown below:
+
+```{r echo=FALSE}
+#Running model 1
+ConfusionMatrix1 = table(pred1,test$relationship_grouped)
+kable(ConfusionMatrix1)
+```
+
+There are a sizable amount of false positives and false negatives, but we would like to see if there's any improvement if we bring in the rest of our variables, and is the increase in parameters *worth it?*
+
+So we run a new model, and this time with all of the variables we made available, not just the ones that seem natural, and we compare the `AIC` of these models.  
+
+```{r echo=FALSE, warning=FALSE}
+#Running model 2
+model2 <- glm(relationship_grouped~., data = train,family = "binomial")
+
+pred2 = plogis(predict(model2,newdata=test)) > 0.5
+accuracy2 = sum(pred2 == test$relationship_grouped)/length(pred2)
+
+kable(AIC(model1, model2))
+
+```
+
+The accuracy of that model was `r 100*accuracy2` % and the confusion matrix is shown below.
+
+```{r echo=FALSE}
+#Running model 1
+ConfusionMatrix2 = table(pred1,test$relationship_grouped)
+kable(ConfusionMatrix2)
+```
+
+We find that the `AIC` value of our initial glm is `r  AIC(model1)`, which is greater than the `AIC` value of our second model with a value of `r  AIC(model2)`. This means that having all those extra factors is worth the increase in parameters and we can feel relatively safe about not overfitting with our number of parameters. 
+
+### Naive Bayes
+Another model in our arsenal is a simple yet powerful statistical tool for looking at the correlations hidden in categorical data: The Naive Bayes Model. The fact that we have a large dataset with a good amount of categorical variables makes this model well suited to be used in our analysis. We run the analysis with some laplace smoothing to make sure that any combination of categorical variables that are spread too thin are analysed appropriately. The summary for this model is shown below. 
+
+```{r echo=FALSE, warning=FALSE}
+model_naivebayes = naive_bayes(relationship_grouped ~ .,data=train,laplace=3)
+pred_nb = predict(model_naivebayes,newdata=test)
+accuracy_nb = sum(pred_nb == test$relationship_grouped)/length(pred_nb)
+
+summary(model_naivebayes)
+```
+
+More importantly, we find that the Naive Bayes algorithm is worse than our glm models. It gives us an accuracy of `r 100*accuracy_nb`%, and has the following confusion matrix.
+
+```{r echo=FALSE}
+ConfusionMatrix_nb = table(pred_nb,test$relationship_grouped)
+kable(ConfusionMatrix_nb)
+```
+
+Even though the interpretability of such a model makes it very attractive to consider, we feel that it is not worth the decrease in accuracy when compared to the `glm`.
+
+
+### Random Forest Model 
+Our last attempt will be on a random forest model. These are quite general and flexible models and are hence quite attractive to use in this situation, though they may take a longer time to run. 
+
+```{r echo=FALSE, warning=FALSE}
+model_rf <- randomForest(as.factor(relationship_grouped)~.,data=train, ntree=500, importance=TRUE,do.trace=10) 
+
+pred_rf = predict(model_rf,newdata=test)
+accuracy_rf = sum(pred_rf == test$relationship_grouped)/length(pred_rf)
+summary(model_rf)
+```
+
+We get the following confusion matrix for the Random Forest Model:
+
+```{r echo=FALSE, warning=FALSE}
+ConfusionMatrix_rf = table(pred_rf,test$relationship_grouped)
+kable(ConfusionMatrix_rf)
+```
+
+The accuracy of `r 100*accuracy_rf`% and comparatively smaller off diagonal elements on the confusion matrix make the random forest model the most accurate so far, and well worth the increase in computation time.
+
+
+### Model Validation
+We compile the results and compare our different models below.
+
+```{r echo=FALSE ,warning=FALSE}
+pred1 = plogis(predict(model1,newdata=test)) > 0.5
+accuracy1 = sum(pred1 == test$relationship_grouped)/length(pred1)
+
+pred2 = plogis(predict(model2,newdata=test)) > 0.5
+accuracy2 = sum(pred2 == test$relationship_grouped)/length(pred2)
+
+pred_nb = predict(model_naivebayes,newdata=test)
+accuracy_nb = sum(pred_nb == test$relationship_grouped)/length(pred_nb)
+
+pred_rf = predict(model_rf,newdata=test)
+accuracy_rf = sum(pred_rf == test$relationship_grouped)/length(pred_rf)
+
+
+accuracies = data.frame("Model" = c("Model 1 (GLM)","Model 2 (GLM)","Model nb (Naive Bayes)","Model rf (Random Forest)"),
+           "Accuracy" = c(accuracy1,accuracy2,accuracy_nb,accuracy_rf))
+
+kable(accuracies)
+
+```
+
+Based on the accuracy we are getting on our `test` set, we see that the most useful algorithm so far is the __random forest algorithm__.
+
+#### Final Words
+It remains to be seen if any results from such a model are actually useful in the real world. Many inherent biases may show up in the data, and results from such data are only as biased as the data collection method. Through out our analysis the source of the data may be transparent, but the collection process is opaque and heterogenously managed as most datasets are in the real world. The sensitive nature of the topic at hand lends us to be careful of any implications extracted from such an analysis without looking into further detail, the collection methods and the anthropological mechanisms surrounding them.
+
+
+
+# Appendix
+## Summary of the dataset
+```{r echo=FALSE}
+summary(homicides)
+colnames(homicides)
+sapply(homicides, class)
+glimpse(homicides)
+```
+## Other code used to explore dataset
+```{r echo=FALSE}
+unique(homicides$victim.ethnicity)
+unique(homicides$perpetrator.ethnicity)
+```
+### Solve Rate based on victims age. 
+
+``` {r echo = FALSE, fig.height=3, fig.width=8}
+
+homicide_victim_under_18 <- homicides_raw %>% filter(victim.age != 998 & victim.age<18)%>%na.omit()
+
+homicides_victim_over_18 <- homicides_raw %>% filter(victim.age != 998 & victim.age >= 18)%>%na.omit()
+
+homicides_victims_under_18_per_year <- homicide_victim_under_18%>%
+  group_by(year) %>%
+  summarize(yes = sum(crime.solved=="Yes"),
+            no = sum(crime.solved=="No"),
+            total = yes+no,
+            avg_solved = (yes/(yes+no)))
+
+
+homicides_victims_over_18_per_year <- homicides_victim_over_18%>%
+  group_by(year) %>%
+  summarize(yes = sum(crime.solved=="Yes"),
+            no = sum(crime.solved=="No"),
+            total = yes+no,
+            avg_solved = (yes/(yes+no)))
+
+colors_victims <- c("Over 18"="red", "Under 18"="blue")
+
+homicides_victims_over_18_per_year %>%
+  ggplot() +geom_line(aes(year, avg_solved, color = "Over 18"))+geom_line(homicides_victims_under_18_per_year, mapping= aes(year, avg_solved, color="Under 18"))+ xlab("Year") + 
+  ylab("% Solved") + ggtitle("Solve Rate for Victims")+scale_y_continuous(labels = function(x) paste0(x*100, "%"))+
+  labs(colour = "Victim Age")
+
+```
+
+### Homicide Victims based on Race
+``` {r echo=FALSE, fig.height=3, fig.width=8}
+
+homicides %>%
+  filter(victim.race != "Unknown") %>%
+  ggplot() + geom_bar(aes(victim.race, fill = victim.race)) + xlab("Victim Race") + 
+  ylab("Number of Homicides") + ggtitle("Homicide Victims by Race") + labs(fill="Race") 
+
+
+```
+
+
+### Homicide count based on Season and Month
+``` {r echo=FALSE,fig.height=3, fig.width=10}
+homicides$month <- factor(homicides$month, levels = c("January", "February", "March", "April", "May", "June", "July", "August",
+                                                        "September", "October", "November", "December"))
+
+homicides_seasons<- homicides%>%
+  group_by(month) %>%
+  mutate(season = ifelse (month == "December"|| month =="January"|| month == "February", "Winter", 
+                          ifelse (month == "March"|| month == "April" || month == "May", "Spring", 
+                                  ifelse(month == "June"|| month == "July"|| month =="August", "Summer", "Fall"))))%>%
+  ungroup()
+
+homicides_seasons %>%
+  ggplot()+geom_bar(aes(month, fill =season))+ggtitle("Homicides by Season by Month") + labs(fill="Season")+ylab("Number of Homicides")+scale_fill_manual("Season", values =c("Summer" = "orangered", "Winter"= "skyblue", "Spring" = "darkgreen", "Fall" = "darkred"))
+
+
+```
+
+Summer months: July and August are the months with the highest number of total homicides.
